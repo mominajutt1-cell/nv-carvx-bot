@@ -1,0 +1,13 @@
+{
+  "name": "nv-chassis-render-bot-v4",
+  "version": "1.0.0",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.3",
+    "playwright": "1.60.0"
+  }
+}
