@@ -7,7 +7,7 @@ const PORT = process.env.PORT || 10000;
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
-    service: 'nv-chassis-bot-v6-direct-safe'
+    service: 'nv-chassis-bot-v7-wait-fix'
   });
 });
 
@@ -64,13 +64,19 @@ app.get('/lookup', async (req, res) => {
       timeout: 90000
     });
 
-    await page.waitForTimeout(9000);
+    await page.waitForFunction(() => {
+      const t = document.body.innerText || '';
+      return (
+        !t.includes('Searching in our database') ||
+        location.href.includes('/search/car') ||
+        location.href.includes('/search/error-occurred')
+      );
+    }, { timeout: 60000 }).catch(() => {});
+
+    await page.waitForTimeout(3000);
 
     const finalUrl = page.url();
-
-    const rawText = await page.evaluate(() => {
-      return document.body.innerText || '';
-    });
+    const rawText = await page.evaluate(() => document.body.innerText || '');
 
     if (
       finalUrl.includes('/search/error-occurred') ||
@@ -78,7 +84,6 @@ app.get('/lookup', async (req, res) => {
       rawText.toUpperCase().includes('AN ERROR OCCURRED WHILE SEARCHING')
     ) {
       await browser.close();
-
       return res.json({
         ok: false,
         source: 'vehicle-lookup-playwright',
@@ -91,7 +96,6 @@ app.get('/lookup', async (req, res) => {
 
     if (!rawText.toUpperCase().includes('VEHICLE DETAILS')) {
       await browser.close();
-
       return res.json({
         ok: false,
         source: 'vehicle-lookup-playwright',
@@ -143,17 +147,11 @@ app.get('/lookup', async (req, res) => {
       raw_preview: rawText.substring(0, 3000)
     });
   } catch (err) {
-    if (browser) {
-      await browser.close().catch(() => {});
-    }
-
-    return res.json({
-      ok: false,
-      error: err.message
-    });
+    if (browser) await browser.close().catch(() => {});
+    return res.json({ ok: false, error: err.message });
   }
 });
 
 app.listen(PORT, () => {
-  console.log('NV chassis bot v6 running on port ' + PORT);
+  console.log('NV chassis bot v7 running on port ' + PORT);
 });
