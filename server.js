@@ -1,4 +1,3 @@
-
 const express = require('express');
 const { chromium } = require('playwright');
 
@@ -6,105 +5,126 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'nv-chassis-bot-v4-carvx-image' });
+  res.json({ status: 'ok', service: 'nv-chassis-bot-v5-form-search' });
 });
 
-function cleanField(v) {
-  if (!v) return '*No info*';
-  return String(v).replace(/\s+/g, ' ').trim() || '*No info*';
+function clean(v) {
+  return (v || '').replace(/\s+/g, ' ').trim();
 }
 
-function getField(rawText, label, nextLabels) {
+function getField(text, label, nextLabels) {
   const regex = new RegExp(
     label + ':\\s*(.*?)\\s*(?=' + nextLabels.join('|') + '|\\n|$)',
     'i'
   );
-  const match = rawText.match(regex);
-  return match ? cleanField(match[1]) : '*No info*';
-}
-
-async function extractVehicleImage(page) {
-  try {
-    const imgs = await page.$$eval('img', (nodes) => nodes.map((img) => {
-      const r = img.getBoundingClientRect();
-      return {
-        src: img.currentSrc || img.src || img.getAttribute('src') || '',
-        alt: img.alt || '',
-        title: img.title || '',
-        className: img.className || '',
-        id: img.id || '',
-        width: img.naturalWidth || r.width || 0,
-        height: img.naturalHeight || r.height || 0,
-        rectWidth: r.width || 0,
-        rectHeight: r.height || 0,
-        top: r.top || 0,
-        left: r.left || 0
-      };
-    }));
-
-    const badWords = [
-      'logo','icon','sprite','star','sample','report','banner','payment','visa',
-      'master','paypal','cidm','loader','loading','facebook','twitter','linkedin'
-    ];
-
-    const candidates = imgs
-      .filter(i => i.src && /^https?:\/\//i.test(i.src))
-      .filter(i => {
-        const hay = (i.src + ' ' + i.alt + ' ' + i.title + ' ' + i.className + ' ' + i.id).toLowerCase();
-        if (badWords.some(w => hay.includes(w))) return false;
-        if ((i.width < 120 || i.height < 80) && (i.rectWidth < 120 || i.rectHeight < 80)) return false;
-        return true;
-      })
-      .map(i => ({
-        ...i,
-        score:
-          (i.width || i.rectWidth) +
-          (i.height || i.rectHeight) +
-          ((i.left < 400 && i.top < 800) ? 400 : 0)
-      }))
-      .sort((a,b) => b.score - a.score);
-
-    return candidates.length ? candidates[0].src : null;
-  } catch (e) {
-    return null;
-  }
+  const match = text.match(regex);
+  return match ? clean(match[1]) : '*No info*';
 }
 
 app.get('/lookup', async (req, res) => {
   let browser;
-  try {
-    const chassis = (req.query.chassis || '').trim().toUpperCase();
 
-    if (!/^[A-Z0-9]{2,12}-?[A-Z0-9]{4,12}$/.test(chassis)) {
+  try {
+    const chassis = clean(req.query.chassis || '').toUpperCase();
+
+    if (!/^[A-Z0-9-]{5,25}$/.test(chassis)) {
       return res.json({ ok: false, error: 'Invalid chassis number' });
     }
 
     browser = await chromium.launch({
       headless: true,
-      args: ['--no-sandbox', '--disable-dev-shm-usage']
+      args: [
+        '--no-sandbox',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-dev-shm-usage'
+      ]
     });
 
-    const page = await browser.newPage({
-      viewport: { width: 1366, height: 900 },
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36'
+    const context = await browser.newContext({
+      viewport: { width: 1366, height: 768 },
+      userAgent:
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+      locale: 'en-US'
     });
 
-    const searchUrl = 'https://carvx.jp/search/new?chassis_number=' + encodeURIComponent(chassis);
+    const page = await context.newPage();
 
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 90000 });
+    await page.goto('https://carvx.jp/', {
+      waitUntil: 'domcontentloaded',
+      timeout: 90000
+    });
 
-    // Wait for redirect/result text
-    try {
-      await page.waitForFunction(() => {
-        const t = document.body ? document.body.innerText : '';
-        return /VEHICLE DETAILS|YOUR CAR RECORDS FOUND|NO RECORD/i.test(t);
-      }, { timeout: 30000 });
-    } catch (e) {
-      await page.waitForTimeout(5000);
+    await page.waitForTimeout(3000);
+
+    await page.goto('https://carvx.jp/search/new', {
+      waitUntil: 'domcontentloaded',
+      timeout: 90000
+    });
+
+    await page.waitForTimeout(3000);
+
+    const input =
+      (await page.$('input[name="chassis_number"]')) ||
+      (await page.$('input[type="text"]'));
+
+    if (!input) {
+      await browser.close();
+      return res.json({
+        ok: false,
+        error: 'Search form not found. Website layout may have changed.'
+      });
     }
 
-    const rawText = await page.evaluate(() => document.body.innerText || '');
+    await input.fill(chassis);
+    await page.waitForTimeout(1000);
+
+    const button =
+      (await page.$('button[type="submit"]')) ||
+      (await page.$('input[type="submit"]')) ||
+      (await page.$('button'));
+
+    if (button) {
+      await Promise.allSettled([
+        page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 90000 }),
+        button.click()
+      ]);
+    } else {
+      await input.press('Enter');
+      await page.waitForTimeout(8000);
+    }
+
+    await page.waitForTimeout(8000);
+
     const finalUrl = page.url();
+    const rawText = await page.evaluate(() => document.body.innerText || '');
+
+    if (
+      finalUrl.includes('/search/error-occurred') ||
+      rawText.toUpperCase().includes('SEARCH ERROR OCCURRED') ||
+      rawText.toUpperCase().includes('AN ERROR OCCURRED WHILE SEARCHING')
+    ) {
+      await browser.close();
+      return res.json({
+        ok: false,
+        source: 'vehicle-lookup-playwright',
+        chassis,
+        result_url: finalUrl,
+        error: 'Vehicle data is temporarily unavailable. Please try again later.',
+        raw_preview: rawText.substring(0, 1500)
+      });
+    }
+
+    if (!rawText.toUpperCase().includes('VEHICLE DETAILS')) {
+      await browser.close();
+      return res.json({
+        ok: false,
+        source: 'vehicle-lookup-playwright',
+        chassis,
+        result_url: finalUrl,
+        error: 'No vehicle details found.',
+        raw_preview: rawText.substring(0, 1500)
+      });
+    }
 
     const fields = {
       Make: getField(rawText, 'Make', ['Body:']),
@@ -115,10 +135,20 @@ app.get('/lookup', async (req, res) => {
       Drive: getField(rawText, 'Drive', ['Year:']),
       Year: getField(rawText, 'Year', ['Transmission:']),
       Transmission: getField(rawText, 'Transmission', ['Fuel:']),
-      Fuel: getField(rawText, 'Fuel', ['JPY', 'LOGIN', 'CONTACT', '$'])
+      Fuel: getField(rawText, 'Fuel', ['JPY', 'LOGIN', 'CONTACT'])
     };
 
-    const carvx_image_url = await extractVehicleImage(page);
+    let carvx_image_url = null;
+
+    const imgs = await page.$$eval('img', imgs =>
+      imgs
+        .map(img => img.src)
+        .filter(src => src && src.startsWith('http'))
+        .filter(src => !src.toLowerCase().includes('logo'))
+        .filter(src => !src.toLowerCase().includes('icon'))
+    );
+
+    if (imgs.length) carvx_image_url = imgs[0];
 
     await browser.close();
 
@@ -131,14 +161,14 @@ app.get('/lookup', async (req, res) => {
       carvx_image_url,
       image_url: carvx_image_url,
       message: 'Result found',
-      raw_preview: rawText.substring(0, 2500)
+      raw_preview: rawText.substring(0, 3000)
     });
   } catch (err) {
-    if (browser) {
-      try { await browser.close(); } catch(e) {}
-    }
+    if (browser) await browser.close().catch(() => {});
     return res.json({ ok: false, error: err.message });
   }
 });
 
-app.listen(PORT, () => console.log('NV chassis bot running on port ' + PORT));
+app.listen(PORT, () => {
+  console.log('NV chassis bot v5 running on port ' + PORT);
+});
