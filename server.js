@@ -5,11 +5,14 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'nv-chassis-bot-v5-form-search' });
+  res.json({
+    status: 'ok',
+    service: 'nv-chassis-bot-v6-direct-safe'
+  });
 });
 
-function clean(v) {
-  return (v || '').replace(/\s+/g, ' ').trim();
+function clean(value) {
+  return (value || '').replace(/\s+/g, ' ').trim();
 }
 
 function getField(text, label, nextLabels) {
@@ -28,15 +31,18 @@ app.get('/lookup', async (req, res) => {
     const chassis = clean(req.query.chassis || '').toUpperCase();
 
     if (!/^[A-Z0-9-]{5,25}$/.test(chassis)) {
-      return res.json({ ok: false, error: 'Invalid chassis number' });
+      return res.json({
+        ok: false,
+        error: 'Invalid chassis number'
+      });
     }
 
     browser = await chromium.launch({
       headless: true,
       args: [
         '--no-sandbox',
-        '--disable-blink-features=AutomationControlled',
-        '--disable-dev-shm-usage'
+        '--disable-dev-shm-usage',
+        '--disable-blink-features=AutomationControlled'
       ]
     });
 
@@ -49,54 +55,22 @@ app.get('/lookup', async (req, res) => {
 
     const page = await context.newPage();
 
-    await page.goto('https://carvx.jp/', {
+    const searchUrl =
+      'https://carvx.jp/search/new?chassis_number=' +
+      encodeURIComponent(chassis);
+
+    await page.goto(searchUrl, {
       waitUntil: 'domcontentloaded',
       timeout: 90000
     });
 
-    await page.waitForTimeout(3000);
-
-    await page.goto('https://carvx.jp/search/new', {
-      waitUntil: 'domcontentloaded',
-      timeout: 90000
-    });
-
-    await page.waitForTimeout(3000);
-
-    const input =
-      (await page.$('input[name="chassis_number"]')) ||
-      (await page.$('input[type="text"]'));
-
-    if (!input) {
-      await browser.close();
-      return res.json({
-        ok: false,
-        error: 'Search form not found. Website layout may have changed.'
-      });
-    }
-
-    await input.fill(chassis);
-    await page.waitForTimeout(1000);
-
-    const button =
-      (await page.$('button[type="submit"]')) ||
-      (await page.$('input[type="submit"]')) ||
-      (await page.$('button'));
-
-    if (button) {
-      await Promise.allSettled([
-        page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 90000 }),
-        button.click()
-      ]);
-    } else {
-      await input.press('Enter');
-      await page.waitForTimeout(8000);
-    }
-
-    await page.waitForTimeout(8000);
+    await page.waitForTimeout(9000);
 
     const finalUrl = page.url();
-    const rawText = await page.evaluate(() => document.body.innerText || '');
+
+    const rawText = await page.evaluate(() => {
+      return document.body.innerText || '';
+    });
 
     if (
       finalUrl.includes('/search/error-occurred') ||
@@ -104,6 +78,7 @@ app.get('/lookup', async (req, res) => {
       rawText.toUpperCase().includes('AN ERROR OCCURRED WHILE SEARCHING')
     ) {
       await browser.close();
+
       return res.json({
         ok: false,
         source: 'vehicle-lookup-playwright',
@@ -116,6 +91,7 @@ app.get('/lookup', async (req, res) => {
 
     if (!rawText.toUpperCase().includes('VEHICLE DETAILS')) {
       await browser.close();
+
       return res.json({
         ok: false,
         source: 'vehicle-lookup-playwright',
@@ -146,9 +122,12 @@ app.get('/lookup', async (req, res) => {
         .filter(src => src && src.startsWith('http'))
         .filter(src => !src.toLowerCase().includes('logo'))
         .filter(src => !src.toLowerCase().includes('icon'))
+        .filter(src => !src.toLowerCase().includes('sample'))
     );
 
-    if (imgs.length) carvx_image_url = imgs[0];
+    if (imgs.length) {
+      carvx_image_url = imgs[0];
+    }
 
     await browser.close();
 
@@ -164,11 +143,17 @@ app.get('/lookup', async (req, res) => {
       raw_preview: rawText.substring(0, 3000)
     });
   } catch (err) {
-    if (browser) await browser.close().catch(() => {});
-    return res.json({ ok: false, error: err.message });
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
+
+    return res.json({
+      ok: false,
+      error: err.message
+    });
   }
 });
 
 app.listen(PORT, () => {
-  console.log('NV chassis bot v5 running on port ' + PORT);
+  console.log('NV chassis bot v6 running on port ' + PORT);
 });
