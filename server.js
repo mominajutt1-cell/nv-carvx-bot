@@ -1,157 +1,111 @@
-const express = require('express');
-const { chromium } = require('playwright');
+const express = require("express");
+const crypto = require("crypto");
 
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    service: 'nv-chassis-bot-v7-wait-fix'
-  });
+const CARVX_USER_UID = process.env.CARVX_USER_UID;
+const CARVX_API_KEY = process.env.CARVX_API_KEY;
+
+function clean(v) {
+  return (v || "").toString().replace(/\s+/g, " ").trim();
+}
+
+function signature(params, apiKey) {
+  const sorted = Object.keys(params).sort();
+  let str = "";
+  for (const key of sorted) str += key + params[key];
+  str += apiKey;
+  return crypto.createHash("sha256").update(str).digest("hex");
+}
+
+app.get("/health", (req, res) => {
+  res.json({ status: "ok", service: "nv-carvx-official-api-v1" });
 });
 
-function clean(value) {
-  return (value || '').replace(/\s+/g, ' ').trim();
-}
-
-function getField(text, label, nextLabels) {
-  const regex = new RegExp(
-    label + ':\\s*(.*?)\\s*(?=' + nextLabels.join('|') + '|\\n|$)',
-    'i'
-  );
-  const match = text.match(regex);
-  return match ? clean(match[1]) : '*No info*';
-}
-
-app.get('/lookup', async (req, res) => {
-  let browser;
-
+app.get("/lookup", async (req, res) => {
   try {
-    const chassis = clean(req.query.chassis || '').toUpperCase();
+    const chassis = clean(req.query.chassis).toUpperCase();
 
-    if (!/^[A-Z0-9-]{5,25}$/.test(chassis)) {
-      return res.json({
-        ok: false,
-        error: 'Invalid chassis number'
-      });
+    if (!/^[A-Z0-9-]{5,30}$/.test(chassis)) {
+      return res.json({ ok: false, error: "Invalid chassis number" });
     }
 
-    browser = await chromium.launch({
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-blink-features=AutomationControlled'
-      ]
+    if (!CARVX_USER_UID || !CARVX_API_KEY) {
+      return res.json({ ok: false, error: "CAR VX API credentials not configured" });
+    }
+
+    const params = { chassis_number: chassis };
+    const sig = signature(params, CARVX_API_KEY);
+
+    const body = new URLSearchParams(params);
+
+    const r = await fetch("https://carvx.jp/api/v1/create-search", {
+      method: "POST",
+      headers: {
+        "Carvx-User-Uid": CARVX_USER_UID,
+        "Carvx-Signature": sig,
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      body
     });
 
-    const context = await browser.newContext({
-      viewport: { width: 1366, height: 768 },
-      userAgent:
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
-      locale: 'en-US'
-    });
+    const text = await r.text();
 
-    const page = await context.newPage();
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      return res.json({ ok: false, error: "Invalid API response", status: r.status, raw: text });
+    }
 
-    const searchUrl =
-      'https://carvx.jp/search/new?chassis_number=' +
-      encodeURIComponent(chassis);
+    if (!r.ok || json.error) {
+      return res.json({ ok: false, error: json.error || "API request failed", status: r.status, raw: json });
+    }
 
-    await page.goto(searchUrl, {
-      waitUntil: 'domcontentloaded',
-      timeout: 90000
-    });
+    const car = json?.data?.cars?.[0];
 
-    await page.waitForFunction(() => {
-      const t = document.body.innerText || '';
-      return (
-        !t.includes('Searching in our database') ||
-        location.href.includes('/search/car') ||
-        location.href.includes('/search/error-occurred')
-      );
-    }, { timeout: 60000 }).catch(() => {});
-
-    await page.waitForTimeout(3000);
-
-    const finalUrl = page.url();
-    const rawText = await page.evaluate(() => document.body.innerText || '');
-
-    if (
-      finalUrl.includes('/search/error-occurred') ||
-      rawText.toUpperCase().includes('SEARCH ERROR OCCURRED') ||
-      rawText.toUpperCase().includes('AN ERROR OCCURRED WHILE SEARCHING')
-    ) {
-      await browser.close();
+    if (!car) {
       return res.json({
         ok: false,
-        source: 'vehicle-lookup-playwright',
         chassis,
-        result_url: finalUrl,
-        error: 'Vehicle data is temporarily unavailable. Please try again later.',
-        raw_preview: rawText.substring(0, 1500)
+        error: "No vehicle found",
+        raw: json
       });
     }
 
-    if (!rawText.toUpperCase().includes('VEHICLE DETAILS')) {
-      await browser.close();
-      return res.json({
-        ok: false,
-        source: 'vehicle-lookup-playwright',
-        chassis,
-        result_url: finalUrl,
-        error: 'No vehicle details found.',
-        raw_preview: rawText.substring(0, 1500)
-      });
-    }
-
-    const fields = {
-      Make: getField(rawText, 'Make', ['Body:']),
-      Body: getField(rawText, 'Body', ['Model:']),
-      Model: getField(rawText, 'Model', ['Engine:']),
-      Engine: getField(rawText, 'Engine', ['Grade:']),
-      Grade: getField(rawText, 'Grade', ['Drive:']),
-      Drive: getField(rawText, 'Drive', ['Year:']),
-      Year: getField(rawText, 'Year', ['Transmission:']),
-      Transmission: getField(rawText, 'Transmission', ['Fuel:']),
-      Fuel: getField(rawText, 'Fuel', ['JPY', 'LOGIN', 'CONTACT'])
-    };
-
-    let carvx_image_url = null;
-
-    const imgs = await page.$$eval('img', imgs =>
-      imgs
-        .map(img => img.src)
-        .filter(src => src && src.startsWith('http'))
-        .filter(src => !src.toLowerCase().includes('logo'))
-        .filter(src => !src.toLowerCase().includes('icon'))
-        .filter(src => !src.toLowerCase().includes('sample'))
-    );
-
-    if (imgs.length) {
-      carvx_image_url = imgs[0];
-    }
-
-    await browser.close();
+    const imageUrl = car.image
+      ? car.image.startsWith("http")
+        ? car.image
+        : "https://carvx.jp" + car.image
+      : null;
 
     return res.json({
       ok: true,
-      source: 'vehicle-lookup-playwright',
+      source: "carvx-official-api",
       chassis,
-      result_url: finalUrl,
-      fields,
-      carvx_image_url,
-      image_url: carvx_image_url,
-      message: 'Result found',
-      raw_preview: rawText.substring(0, 3000)
+      search_id: json.data.uid,
+      car_id: car.car_id,
+      fields: {
+        Make: car.make || "*No info*",
+        Body: car.body || "*No info*",
+        Model: car.model || "*No info*",
+        Engine: car.engine || "*No info*",
+        Grade: car.grade || "*No info*",
+        Drive: car.drive || "*No info*",
+        Year: car.manufacture_date || "*No info*",
+        Transmission: car.transmission || "*No info*",
+        Fuel: car.fuel || "*No info*"
+      },
+      image_url: imageUrl,
+      message: "Result found",
+      raw: json
     });
-  } catch (err) {
-    if (browser) await browser.close().catch(() => {});
-    return res.json({ ok: false, error: err.message });
+  } catch (e) {
+    return res.json({ ok: false, error: e.message });
   }
 });
 
 app.listen(PORT, () => {
-  console.log('NV chassis bot v7 running on port ' + PORT);
+  console.log("NV CAR VX official API bot running on port " + PORT);
 });
